@@ -1,0 +1,20 @@
+{
+	"manifest_version": 3,
+	"name": "Twitter Auto-Expand",
+	"version": "1.0",
+	"description": "Automatically expands long Twitter/X posts by clicking 'Show more' buttons",
+	"permissions": ["activeTab"],
+	"host_permissions": ["https://twitter.com/*", "https://x.com/*"],
+	"content_scripts": [
+		{
+			"matches": ["https://twitter.com/*", "https://x.com/*"],
+			"js": ["content.js"],
+			"run_at": "document_end"
+		}
+	],
+	"icons": {
+		"16": "icons/icon16.png",
+		"48": "icons/icon48.png",
+		"128": "icons/icon128.png"
+	}
+}
