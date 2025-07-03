@@ -1,49 +1,67 @@
-// Twitter Auto-Expand Content Script
+// Twitter Auto-Expand Content Script - Chrome Optimized
 ;(function () {
 	'use strict'
 
 	// Configuration
 	const CONFIG = {
-		// Delay before clicking (to avoid being too aggressive)
-		clickDelay: 500,
-		// How often to check for new "Show more" buttons
-		checkInterval: 1000,
-		// Debounce delay for mutation observer
-		debounceDelay: 300,
+		clickDelay: 300,
+		debounceDelay: 200,
+		maxProcessPerBatch: 5,
+		intersectionThreshold: 0.1,
 	}
 
-	// Keep track of processed buttons to avoid duplicate clicks
+	// Performance optimizations
 	const processedButtons = new WeakSet()
-	let debounceTimeout
+	const pendingButtons = new Set()
+	let debounceTimer = null
+	let isProcessing = false
+	let observer = null
+	let intersectionObserver = null
+
+	// Cached selectors
+	const BUTTON_SELECTOR = 'button[data-testid="tweet-text-show-more-link"]'
 
 	/**
-	 * Check if this is actually a "Show more" button for truncated text
+	 * Setup Intersection Observer for visibility detection
 	 */
-	function isShowMoreButton(button) {
-		if (!button || !button.isConnected) {
+	function setupIntersectionObserver() {
+		if (intersectionObserver) return
+
+		intersectionObserver = new IntersectionObserver(
+			(entries) => {
+				entries.forEach((entry) => {
+					if (entry.isIntersecting && pendingButtons.has(entry.target)) {
+						pendingButtons.delete(entry.target)
+						processButton(entry.target)
+					}
+				})
+			},
+			{
+				threshold: CONFIG.intersectionThreshold,
+				rootMargin: '100px',
+			},
+		)
+	}
+
+	/**
+	 * Fast button validation
+	 */
+	function isValidShowMoreButton(button) {
+		if (!button?.isConnected || processedButtons.has(button)) {
 			return false
 		}
 
-		// Must have the specific test ID for tweet text expansion
-		if (button.getAttribute('data-testid') !== 'tweet-text-show-more-link') {
+		if (button.dataset.testid !== 'tweet-text-show-more-link') {
 			return false
 		}
 
-		// Check if it contains "Show more" text
-		const buttonText = button.textContent?.trim().toLowerCase()
-		if (!buttonText || !buttonText.includes('show more')) {
+		const style = button.style
+		if (style.display === 'none' || style.visibility === 'hidden') {
 			return false
 		}
 
-		// Verify it's actually visible and clickable
-		if (!isElementVisible(button)) {
-			return false
-		}
-
-		// Additional check: make sure it's within a tweet context
-		const tweetContainer = button.closest('[data-testid="tweet"]') || button.closest('[data-testid="tweetText"]') || button.closest('article[role="article"]')
-
-		if (!tweetContainer) {
+		const text = button.textContent
+		if (!text?.includes('Show more')) {
 			return false
 		}
 
@@ -51,138 +69,191 @@
 	}
 
 	/**
-	 * Check if an element is visible and clickable
+	 * Find closest tweet container efficiently
 	 */
-	function isElementVisible(element) {
-		if (!element || !element.isConnected) {
-			return false
+	function findTweetContainer(element) {
+		let current = element.parentElement
+		let depth = 0
+		const maxDepth = 10
+
+		while (current && depth < maxDepth) {
+			if (current.dataset?.testid === 'tweet' || (current.tagName === 'ARTICLE' && current.getAttribute('role') === 'article')) {
+				return current
+			}
+			current = current.parentElement
+			depth++
 		}
-
-		const style = window.getComputedStyle(element)
-		const rect = element.getBoundingClientRect()
-
-		return style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0' && rect.width > 0 && rect.height > 0 && !element.disabled && !element.hasAttribute('aria-hidden')
+		return null
 	}
 
 	/**
-	 * Find and click legitimate "Show more" buttons
+	 * Process a single button
 	 */
-	function expandTruncatedPosts() {
-		// Use very specific selector to avoid false positives
-		const buttons = document.querySelectorAll('button[data-testid="tweet-text-show-more-link"]')
+	function processButton(button) {
+		if (!isValidShowMoreButton(button)) {
+			return
+		}
 
-		let clickedCount = 0
+		processedButtons.add(button)
 
-		buttons.forEach((button) => {
-			// Skip if already processed
-			if (processedButtons.has(button)) {
-				return
-			}
+		if (!findTweetContainer(button)) {
+			return
+		}
 
-			// Thorough validation
-			if (!isShowMoreButton(button)) {
-				return
-			}
-
-			// Mark as processed immediately to prevent double-clicking
-			processedButtons.add(button)
-
-			// Click with delay to appear natural and avoid rapid-fire clicking
-			setTimeout(() => {
-				try {
-					// Double-check the button is still valid before clicking
-					if (button.isConnected && isShowMoreButton(button)) {
-						button.click()
-						clickedCount++
-						console.log('Twitter Auto-Expand: Expanded truncated post')
-					}
-				} catch (error) {
-					console.error('Twitter Auto-Expand: Error expanding post:', error)
+		setTimeout(() => {
+			try {
+				if (button.isConnected && !button.disabled) {
+					button.click()
+					console.log('Twitter Auto-Expand: Expanded post')
 				}
-			}, CONFIG.clickDelay + clickedCount * 100) // Stagger clicks if multiple buttons
-		})
-
-		if (clickedCount > 0) {
-			console.log(`Twitter Auto-Expand: Processed ${clickedCount} truncated posts`)
-		}
+			} catch (error) {
+				console.error('Twitter Auto-Expand: Click error:', error)
+			}
+		}, CONFIG.clickDelay)
 	}
 
 	/**
-	 * Debounced function to handle DOM changes
+	 * Batch process buttons using requestIdleCallback
+	 */
+	function processPendingButtons() {
+		if (isProcessing) return
+		isProcessing = true
+
+		const buttons = Array.from(pendingButtons).slice(0, CONFIG.maxProcessPerBatch)
+		pendingButtons.clear()
+
+		const processFunction = () => {
+			buttons.forEach((button) => {
+				if (button.isConnected) {
+					intersectionObserver.observe(button)
+				}
+			})
+			isProcessing = false
+		}
+
+		requestIdleCallback(processFunction, { timeout: 1000 })
+	}
+
+	/**
+	 * Find new buttons efficiently
+	 */
+	function findNewButtons() {
+		const buttons = document.querySelectorAll(BUTTON_SELECTOR)
+
+		let newButtonCount = 0
+		for (const button of buttons) {
+			if (!processedButtons.has(button) && isValidShowMoreButton(button)) {
+				pendingButtons.add(button)
+				newButtonCount++
+			}
+		}
+
+		if (newButtonCount > 0) {
+			processPendingButtons()
+		}
+
+		return newButtonCount
+	}
+
+	/**
+	 * Debounced expansion function
 	 */
 	function debouncedExpand() {
-		clearTimeout(debounceTimeout)
-		debounceTimeout = setTimeout(expandTruncatedPosts, CONFIG.debounceDelay)
+		clearTimeout(debounceTimer)
+		debounceTimer = setTimeout(findNewButtons, CONFIG.debounceDelay)
 	}
 
 	/**
-	 * Check if mutation is relevant (contains tweet-related content)
+	 * Setup MutationObserver for DOM changes
 	 */
-	function isRelevantMutation(mutation) {
-		if (mutation.type !== 'childList' || mutation.addedNodes.length === 0) {
-			return false
-		}
+	function setupMutationObserver() {
+		if (observer) return
 
-		for (const node of mutation.addedNodes) {
-			if (node.nodeType === Node.ELEMENT_NODE) {
-				// Check if the added node or its children contain tweet content
-				if (node.querySelector && (node.querySelector('[data-testid="tweet-text-show-more-link"]') || node.querySelector('[data-testid="tweet"]') || node.querySelector('article[role="article"]') || node.matches('[data-testid="tweet"]') || node.matches('article[role="article"]'))) {
-					return true
+		observer = new MutationObserver((mutations) => {
+			let shouldProcess = false
+
+			for (const mutation of mutations) {
+				if (mutation.type === 'childList' && mutation.addedNodes.length > 0) {
+					for (const node of mutation.addedNodes) {
+						if (node.nodeType === Node.ELEMENT_NODE) {
+							if (node.dataset?.testid?.includes('tweet') || node.querySelector?.(BUTTON_SELECTOR) || node.matches?.('[data-testid="tweet"], article[role="article"]')) {
+								shouldProcess = true
+								break
+							}
+						}
+					}
+					if (shouldProcess) break
 				}
 			}
-		}
 
-		return false
-	}
-
-	/**
-	 * Initialize the extension
-	 */
-	function initialize() {
-		console.log('Twitter Auto-Expand: Starting extension')
-
-		// Initial check after page load
-		setTimeout(expandTruncatedPosts, 1000)
-
-		// Set up MutationObserver to watch for new tweets
-		const observer = new MutationObserver((mutations) => {
-			const hasRelevantChanges = mutations.some(isRelevantMutation)
-
-			if (hasRelevantChanges) {
+			if (shouldProcess) {
 				debouncedExpand()
 			}
 		})
 
-		// Start observing with minimal scope
 		observer.observe(document.body, {
 			childList: true,
 			subtree: true,
 		})
-
-		// Periodic check as backup (less frequent)
-		setInterval(expandTruncatedPosts, CONFIG.checkInterval * 3)
-
-		console.log('Twitter Auto-Expand: Extension initialized')
 	}
 
-	// Handle page navigation in single-page apps
-	let currentPath = location.pathname
+	/**
+	 * Handle page navigation
+	 */
+	let currentUrl = location.href
 	function handleNavigation() {
-		if (location.pathname !== currentPath) {
-			currentPath = location.pathname
-			console.log('Twitter Auto-Expand: Page navigation detected')
-			// Wait for new content to load
-			setTimeout(expandTruncatedPosts, 1500)
+		const newUrl = location.href
+		if (newUrl !== currentUrl) {
+			currentUrl = newUrl
+			setTimeout(findNewButtons, 800)
 		}
 	}
 
-	// Listen for navigation changes
-	const navObserver = new MutationObserver(handleNavigation)
-	navObserver.observe(document.body, { childList: true, subtree: true })
+	/**
+	 * Initialize extension
+	 */
+	function initialize() {
+		console.log('Twitter Auto-Expand: Initializing Chrome optimized version')
 
-	// Initialize when DOM is ready
+		setupIntersectionObserver()
+		setupMutationObserver()
+
+		setTimeout(() => {
+			const found = findNewButtons()
+			console.log(`Twitter Auto-Expand: Found ${found} buttons on initial scan`)
+		}, 1000)
+
+		const navObserver = new MutationObserver(handleNavigation)
+		navObserver.observe(document.body, {
+			childList: true,
+			subtree: false,
+		})
+
+		setInterval(() => {
+			pendingButtons.forEach((button) => {
+				if (!button.isConnected) {
+					pendingButtons.delete(button)
+				}
+			})
+			findNewButtons()
+		}, 5000)
+
+		console.log('Twitter Auto-Expand: Initialization complete')
+	}
+
+	/**
+	 * Cleanup observers
+	 */
+	function cleanup() {
+		observer?.disconnect()
+		intersectionObserver?.disconnect()
+		clearTimeout(debounceTimer)
+	}
+
+	addEventListener('beforeunload', cleanup)
+
 	if (document.readyState === 'loading') {
-		document.addEventListener('DOMContentLoaded', initialize)
+		addEventListener('DOMContentLoaded', initialize)
 	} else {
 		initialize()
 	}
