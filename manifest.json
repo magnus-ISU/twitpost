@@ -1,8 +1,8 @@
 {
 	"manifest_version": 3,
-	"name": "Twitter Auto-Expand",
+	"name": "Twitpost Auto-Expand",
 	"version": "1.0",
-	"description": "Automatically expands long Twitter/X posts by clicking 'Show more' buttons",
+	"description": "Automatically expands long X posts by clicking 'Show more' buttons",
 	"permissions": ["activeTab"],
 	"host_permissions": ["https://twitter.com/*", "https://x.com/*"],
 	"content_scripts": [
